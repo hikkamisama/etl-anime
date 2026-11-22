@@ -1,5 +1,3 @@
-"""Небольшие функции для этапов учебного ETL; запуск — notebooks/etl.ipynb."""
-
 import json
 import logging
 import time
@@ -51,7 +49,8 @@ class Settings:
         if missing:
             raise ValueError(f"В .env не заданы: {', '.join(missing)}")
         return cls(
-            dbname=values["POSTGRES_DB"], user=values["POSTGRES_USER"],
+            dbname=values["POSTGRES_DB"],
+            user=values["POSTGRES_USER"],
             password=values["POSTGRES_PASSWORD"],
             host=values.get("POSTGRES_HOST", "127.0.0.1"),
             port=int(values.get("POSTGRES_PORT", "5433")),
@@ -77,13 +76,17 @@ def valid_url(value):
 def make_session(settings):
     session = requests.Session()
     retry = Retry(
-        total=3, backoff_factor=1,
+        total=3,
+        backoff_factor=1,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}), respect_retry_after_header=True,
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
     )
     session.mount("https://", HTTPAdapter(max_retries=retry))
     session.mount("http://", HTTPAdapter(max_retries=retry))
-    session.headers.update({"User-Agent": settings.user_agent, "Accept": "application/json"})
+    session.headers.update(
+        {"User-Agent": settings.user_agent, "Accept": "application/json"}
+    )
     return session
 
 
@@ -93,30 +96,53 @@ def extract(settings, raw_dir, session):
     records, offset = [], 0
     seen_ids = set()
     while len(records) < settings.max_records:
-        params = {"rating": "safe", "limit": min(settings.page_size, settings.max_records - len(records)),
-                  "offset": offset}
+        params = {
+            "rating": "safe",
+            "limit": min(settings.page_size, settings.max_records - len(records)),
+            "offset": offset,
+        }
         try:
-            response = session.get(f"{settings.api_base_url}/images", params=params, timeout=settings.timeout)
+            response = session.get(
+                f"{settings.api_base_url}/images",
+                params=params,
+                timeout=settings.timeout,
+            )
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError) as exc:
-            logger.error("Extract: не удалось получить offset=%s (%s)", offset, type(exc).__name__)
-            raise RuntimeError(f"Ошибка API на offset={offset}; проверьте доступность источника.") from exc
+            logger.error(
+                "Extract: не удалось получить offset=%s (%s)",
+                offset,
+                type(exc).__name__,
+            )
+            raise RuntimeError(
+                f"Ошибка API на offset={offset}; проверьте доступность источника."
+            ) from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
-            raise ValueError("Схема API изменилась: ожидается объект с массивом items.")
+            raise TypeError("Схема API изменилась: ожидается объект с массивом items.")
         items = payload["items"]
-        if not all(isinstance(item, dict) and type(item.get("id")) is int for item in items):
+        if not all(
+            isinstance(item, dict) and type(item.get("id")) is int for item in items
+        ):
             raise ValueError("Схема API изменилась: нужна другая обработка айтема")
         (raw_dir / f"offset_{offset:06d}.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("Extract: offset=%s, получено=%s, доступно=%s", offset, len(items), payload.get("count"))
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(
+            "Extract: offset=%s, получено=%s, доступно=%s",
+            offset,
+            len(items),
+            payload.get("count"),
+        )
         if not items:
             break
         ids = {item["id"] for item in items}
         if ids <= seen_ids:
-            raise RuntimeError("API повторяет уже полученную страницу; загрузка остановлена.")
+            raise RuntimeError(
+                "API повторяет уже полученную страницу; загрузка остановлена."
+            )
         seen_ids.update(ids)
-        records.extend(items[:settings.max_records - len(records)])
+        records.extend(items[: settings.max_records - len(records)])
         offset += len(items)
         count = payload.get("count")
         if type(count) is int and offset >= count:
@@ -129,8 +155,11 @@ def extract(settings, raw_dir, session):
 
 
 def rgb_valid(value):
-    return (isinstance(value, list) and len(value) == 3
-            and all(type(channel) is int and 0 <= channel <= 255 for channel in value))
+    return (
+        isinstance(value, list)
+        and len(value) == 3
+        and all(type(channel) is int and 0 <= channel <= 255 for channel in value)
+    )
 
 
 def optional_text(value):
@@ -143,31 +172,61 @@ def transform(records, extracted_at):
     rows = []
     for record in records:
         image_id = record.get("id")
-        if type(image_id) is not int or image_id <= 0 or not valid_url(record.get("url")):
+        if (
+            type(image_id) is not int
+            or image_id <= 0
+            or not valid_url(record.get("url"))
+        ):
             continue
         tags = record.get("tags")
-        tags = sorted({tag.strip().lower() for tag in (tags if isinstance(tags, list) else [])
-                       if isinstance(tag, str) and tag.strip()})
+        tags = sorted(
+            {
+                tag.strip().lower()
+                for tag in (tags if isinstance(tags, list) else [])
+                if isinstance(tag, str) and tag.strip()
+            }
+        )
         dominant = record.get("color_dominant")
         palette = record.get("color_palette")
-        palette = [color for color in (palette if isinstance(palette, list) else []) if rgb_valid(color)]
-        rows.append({
-            "image_id": image_id,
-            "image_url": record["url"],
-            "rating": record["rating"],
-            "artist_name": optional_text(record.get("artist_name")),
-            "source_url": record.get("source_url") if valid_url(record.get("source_url")) else None,
-            "tags": tags,
-            "dominant_color_hex": "#{:02x}{:02x}{:02x}".format(*dominant) if rgb_valid(dominant) else None,
-            "color_palette": palette,
-            "extracted_at": extracted_at,
-        })
+        palette = [
+            color
+            for color in (palette if isinstance(palette, list) else [])
+            if rgb_valid(color)
+        ]
+        rows.append(
+            {
+                "image_id": image_id,
+                "image_url": record["url"],
+                "rating": record["rating"],
+                "artist_name": optional_text(record.get("artist_name")),
+                "source_url": record.get("source_url")
+                if valid_url(record.get("source_url"))
+                else None,
+                "tags": tags,
+                "dominant_color_hex": "#{:02x}{:02x}{:02x}".format(*dominant)
+                if rgb_valid(dominant)
+                else None,
+                "color_palette": palette,
+                "extracted_at": extracted_at,
+            }
+        )
     if not rows:
-        raise ValueError("После очистки не осталось корректных записей; таблица не изменена.")
-    frame = pd.DataFrame(rows).drop_duplicates("image_id", keep="last").reset_index(drop=True)
+        raise ValueError(
+            "После очистки не осталось корректных записей; таблица не изменена."
+        )
+    frame = (
+        pd.DataFrame(rows)
+        .drop_duplicates("image_id", keep="last")
+        .reset_index(drop=True)
+    )
     frame["image_id"] = frame["image_id"].astype("int64")
     frame["extracted_at"] = pd.to_datetime(frame["extracted_at"], utc=True)
-    logger.info("Transform: вход=%s, результат=%s, отброшено/дубли=%s", len(records), len(frame), len(records) - len(frame))
+    logger.info(
+        "Transform: вход=%s, результат=%s, отброшено/дубли=%s",
+        len(records),
+        len(frame),
+        len(records) - len(frame),
+    )
     return frame
 
 
@@ -176,32 +235,57 @@ def connect(settings):
     connection = None
     try:
         connection = psycopg2.connect(
-            dbname=settings.dbname, user=settings.user, password=settings.password,
-            host=settings.host, port=settings.port, connect_timeout=10,
+            dbname=settings.dbname,
+            user=settings.user,
+            password=settings.password,
+            host=settings.host,
+            port=settings.port,
+            connect_timeout=10,
         )
         yield connection
     except psycopg2.Error as exc:
         logger.error("PostgreSQL: %s (SQLSTATE=%s)", type(exc).__name__, exc.pgcode)
-        raise RuntimeError("Ошибка PostgreSQL: проверьте docker compose ps, .env и init/init.sql.") from exc
+        raise RuntimeError(
+            "Ошибка PostgreSQL: проверьте docker compose ps, .env и init/init.sql."
+        ) from exc
     finally:
         if connection is not None:
             connection.close()
 
 
 def load(frame, settings):
-    values = [(
-        int(row.image_id), row.image_url, row.rating, row.artist_name, row.source_url,
-        row.tags, row.dominant_color_hex, Json(row.color_palette), row.extracted_at.to_pydatetime(),
-    ) for row in frame.itertuples(index=False)]
-    with connect(settings) as connection, connection:
-        with connection.cursor() as cursor:
-            inserted = execute_values(cursor, """
+    values = [
+        (
+            int(row.image_id),
+            row.image_url,
+            row.rating,
+            row.artist_name,
+            row.source_url,
+            row.tags,
+            row.dominant_color_hex,
+            Json(row.color_palette),
+            row.extracted_at.to_pydatetime(),
+        )
+        for row in frame.itertuples(index=False)
+    ]
+    with connect(settings) as connection, connection, connection.cursor() as cursor:
+        inserted = execute_values(
+            cursor,
+            """
                 INSERT INTO anime.images
                     (image_id, image_url, rating, artist_name, source_url, tags,
                      dominant_color_hex, color_palette, extracted_at)
                 VALUES %s ON CONFLICT (image_id) DO NOTHING RETURNING image_id
-            """, values, page_size=100, fetch=True)
-    logger.info("Load: вставлено=%s, уже существовало=%s", len(inserted), len(values) - len(inserted))
+            """,
+            values,
+            page_size=100,
+            fetch=True,
+        )
+    logger.info(
+        "Load: вставлено=%s, уже существовало=%s",
+        len(inserted),
+        len(values) - len(inserted),
+    )
     return len(inserted)
 
 
@@ -213,7 +297,9 @@ def verify(settings):
             SELECT image_id, rating, artist_name, tags, dominant_color_hex, image_url
             FROM anime.images ORDER BY image_id LIMIT 5
         """)
-        sample = pd.DataFrame(cursor.fetchall(), columns=[col.name for col in cursor.description])
+        sample = pd.DataFrame(
+            cursor.fetchall(), columns=[col.name for col in cursor.description]
+        )
     if not total or total != unique:
         raise AssertionError("Проверка количества/уникальности записей не прошла.")
     return total, sample
